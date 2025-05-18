@@ -1,25 +1,14 @@
-# controller.py
-"""
-Master launcher for Crypto-Lab (single-command start-up).
-
-Usage
------
-    python controller.py
-
-Behaviour
----------
-* Verifies required Python packages; installs any that are missing.
-* Seeds the Parquet store with an initial fetch.
-* Imports app.py (which starts APScheduler).
-* Opens the dashboard URL in the default browser.
-* Runs the Flask dev server in a background thread.
-* Logs INFO / ERROR messages to controller.log + console.
-"""
-
 from __future__ import annotations
 
+"""
+Master launcher for Crypto-Lab – starts API + Dash in one command.
+
+Run:
+    python controller.py
+"""
+
 # --------------------------------------------------------------------------- #
-# Bootstrap – ensure deps are installed *inside the current venv*             #
+# Bootstrap – ensure all required packages exist inside the current venv      #
 # --------------------------------------------------------------------------- #
 import importlib.util
 import subprocess
@@ -32,95 +21,104 @@ REQUIRED_PKGS = [
     "pandas",
     "pyarrow",
     "apscheduler",
-    "statsmodels",   # pure-Python fallback forecast model
-    # "statsforecast",  # uncomment if you installed a C++ toolchain / py3.11
+    "flask_cors",
+    "dash",
+    "dash-extensions",    # for Download & other extensions
+    "statsmodels",
+    "python-dotenv",
+    "dash-iconify",
 ]
 
 _missing = [p for p in REQUIRED_PKGS if importlib.util.find_spec(p) is None]
 if _missing:
-    print(f"[bootstrap] installing missing packages: {', '.join(_missing)}")
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", * _missing],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        print("[bootstrap] install complete")
-    except subprocess.CalledProcessError as exc:
-        sys.exit(f"[bootstrap] pip install failed: {exc}")
+    print(f"[bootstrap] installing: {', '.join(_missing)}")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", *_missing])
+    print("[bootstrap] install complete")
 
 # --------------------------------------------------------------------------- #
-# Standard library imports                                                    #
+# Std-lib imports                                                             #
 # --------------------------------------------------------------------------- #
 import logging
 import threading
 import webbrowser
 from time import sleep
 
-# project modules (safe now that deps exist)
-from data_pipeline import fetch_prices
+# --------------------------------------------------------------------------- #
+# Project imports                                                             #
+# --------------------------------------------------------------------------- #
+try:
+    # Package layout  (data_pipeline/…)
+    from data_pipeline.data_pipeline import fetch_prices
+except ImportError:
+    # Flat single-script fallback
+    from data_pipeline import fetch_prices  # type: ignore
 
+# Dash UI module – only imported, not executed yet
+import dash_app  # local file dash_app.py
+
+# --------------------------------------------------------------------------- #
+# Logging                                                                     #
+# --------------------------------------------------------------------------- #
 LOG_FILE = Path(__file__).with_name("controller.log")
-
-# --------------------------------------------------------------------------- #
-# Logging configuration                                                       #
-# --------------------------------------------------------------------------- #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"),
+              logging.StreamHandler()],
 )
 log = logging.getLogger("controller")
 
 # --------------------------------------------------------------------------- #
-# Orchestration helpers                                                       #
+# Helper threads                                                              #
 # --------------------------------------------------------------------------- #
 def run_flask() -> None:
-    """Start Flask app (blocking). Runs in a background thread."""
-    try:
-        # Import here so scheduler inside app.py starts *after* the initial fetch.
-        from app import app  # import-outside-toplevel
+    """Run the Flask API (blocking)."""
+    from api.app import app  # delayed import: waits for bootstrap
+    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
 
-        app.run(debug=False, use_reloader=False)  # 127.0.0.1:5000
-    except Exception:  # noqa: BLE001
-        log.exception("Flask server crashed")
+
+def run_dash() -> None:
+    """Run the Dash dashboard (blocking)."""
+    # Dash ≥2.14 uses app.run(), not run_server()
+    dash_app.app.run(debug=False, port=8050, use_reloader=False)
 
 # --------------------------------------------------------------------------- #
-# Main                                                                         #
+# Main                                                                        #
 # --------------------------------------------------------------------------- #
 def main() -> None:
     log.info("=== Crypto-Lab controller starting ===")
 
-    # 1️⃣ Seed data
+    # 1️⃣  Seed Parquet / NDJSON on first launch
     try:
-        df = fetch_prices()
-        log.info("Initial price fetch OK – rows stored: %d", len(df))
-    except Exception:  # noqa: BLE001
+        rows = fetch_prices()
+        log.info("Initial price fetch OK – rows stored: %d", len(rows))
+    except Exception:
         log.exception("Initial price fetch failed")
 
-    # 2️⃣ Start Flask (in its own thread)
+    # 2️⃣  Start backend threads
     flask_thread = threading.Thread(target=run_flask, daemon=True)
+    dash_thread  = threading.Thread(target=run_dash,  daemon=True)
     flask_thread.start()
-    log.info("Flask thread started")
+    dash_thread.start()
+    log.info("Flask API thread started  (http://127.0.0.1:5000)")
+    log.info("Dash  UI  thread started  (http://127.0.0.1:8050)")
 
-    # 3️⃣ Open the dashboard
+    # 3️⃣  Open browser to the Dash dashboard
     try:
-        sleep(1)  # give Flask a moment to bind port
-        webbrowser.open("http://127.0.0.1:5000/")
-        log.info("Browser window launched")
-    except Exception:  # noqa: BLE001
+        sleep(2)  # give Dash a moment to bind the port
+        webbrowser.open("http://127.0.0.1:8050/")
+        log.info("Browser window launched (Dash dashboard)")
+    except Exception:
         log.exception("Could not open browser")
 
-    # 4️⃣ Keep main thread alive while Flask thread runs
+    # 4️⃣  Keep main thread alive until CTRL+C
     try:
         flask_thread.join()
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt – shutting down")
     finally:
         log.info("=== Controller exit ===")
+
 
 if __name__ == "__main__":
     main()
