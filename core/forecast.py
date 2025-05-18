@@ -23,7 +23,7 @@ import pyarrow.dataset as ds
 
 # ────────────────────────────── configuration ────────────────────────────
 PROJECT_ROOT   = Path(__file__).resolve().parent.parent
-PARQUET_ROOT   = PROJECT_ROOT / "data" / "parquet"      # ← matches pipeline
+PARQUET_ROOT   = PROJECT_ROOT / "data"       # ← matches pipeline
 _HORIZON       = 24                                     # default steps
 _MIN_POINTS    = 6                                      # min hourly points to fit model
 

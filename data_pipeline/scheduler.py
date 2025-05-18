@@ -1,4 +1,3 @@
-# scheduler.py
 """
 APScheduler wrapper for Crypto-Lab.
 
@@ -11,6 +10,7 @@ Contains:
       • Registers the job `fetch_prices` to run every INTERVAL seconds.
       • Logs startup messages.
       • Hooks clean shutdown on process exit.
+      • Attaches a listener for job events (success, error, misfire).
 """
 
 from __future__ import annotations
@@ -18,8 +18,10 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import time
 from datetime import datetime
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,13 +29,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from data_pipeline.data_pipeline import fetch_prices
 
-# --------------------------------------------------------------------------- #
-# Configuration                                                               #
-# --------------------------------------------------------------------------- #
+# ─────────────────────────── Configuration ──────────────────────────── #
 
 FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "60"))  # seconds
 
-# Set up structured logging
+# ───────────────────────────── Logging Setup ──────────────────────────── #
+
 log = logging.getLogger("scheduler")
 if not log.handlers:
     logging.basicConfig(
@@ -42,15 +43,26 @@ if not log.handlers:
         handlers=[logging.StreamHandler()],
     )
 
-# Use a thread pool so fetch_prices can run alongside Flask/server threads
+# ───────────────────────────── Scheduler Setup ─────────────────────────── #
+
 executors = {"default": ThreadPoolExecutor(max_workers=2)}
 jobstores = {"default": MemoryJobStore()}
 
 _scheduler: BackgroundScheduler | None = None
 
-# --------------------------------------------------------------------------- #
-# Public API                                                                  #
-# --------------------------------------------------------------------------- #
+
+def _job_listener(event):
+    """Listen for job events and log appropriately."""
+    job_id = getattr(event, "job_id", "<unknown>")
+    if event.code == EVENT_JOB_EXECUTED:
+        log.info("Job '%s' executed successfully", job_id)
+    elif event.code == EVENT_JOB_MISSED:
+        log.warning("Job '%s' missed its run time", job_id)
+    elif event.code == EVENT_JOB_ERROR:
+        log.error("Job '%s' raised an error: %s", job_id, event.exception, exc_info=True)
+
+
+# ───────────────────────────── Public API ────────────────────────────── #
 
 def start(interval_sec: int = FETCH_INTERVAL) -> BackgroundScheduler:
     """
@@ -60,13 +72,28 @@ def start(interval_sec: int = FETCH_INTERVAL) -> BackgroundScheduler:
     global _scheduler
 
     if _scheduler and _scheduler.running:
+        log.debug("Scheduler already running; returning existing instance")
         return _scheduler
 
-    # Create and start scheduler
-    _scheduler = BackgroundScheduler(executors=executors, jobstores=jobstores, daemon=True)
-    _scheduler.start()
+    log.info("Initializing scheduler (interval=%d seconds)", interval_sec)
+    _scheduler = BackgroundScheduler(
+        executors=executors,
+        jobstores=jobstores,
+        daemon=True,
+        timezone="UTC",
+    )
 
-    # Schedule the fetch job
+    # Attach listener for all job events
+    _scheduler.add_listener(
+        _job_listener,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
+
+    # Start the scheduler
+    _scheduler.start()
+    log.info("Scheduler started")
+
+    # Schedule the price-fetch job
     _scheduler.add_job(
         func=fetch_prices,
         trigger=IntervalTrigger(seconds=interval_sec),
@@ -76,31 +103,35 @@ def start(interval_sec: int = FETCH_INTERVAL) -> BackgroundScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-
     log.info(
-        "[%s] Scheduler started; fetching every %d seconds",
-        datetime.now().isoformat(timespec="seconds"),
+        "[%s] Scheduled 'fetch_prices' every %d seconds",
+        datetime.utcnow().isoformat(timespec="seconds"),
         interval_sec,
     )
 
     # Ensure clean shutdown on process exit
-    atexit.register(lambda: _scheduler.shutdown(wait=False))
+    atexit.register(_shutdown)
 
     return _scheduler
 
 
-# --------------------------------------------------------------------------- #
-# CLI helper                                                                 #
-# --------------------------------------------------------------------------- #
+def _shutdown():
+    """Cleanly shut down the scheduler."""
+    if _scheduler and _scheduler.running:
+        log.info("Shutting down scheduler…")
+        _scheduler.shutdown(wait=False)
+        log.info("Scheduler shut down")
+
+
+# ───────────────────────────── CLI Helper ────────────────────────────── #
 
 if __name__ == "__main__":
-    # Run scheduler standalone for testing
-    log.info("Starting scheduler standalone (Ctrl+C to exit)…")
+    log.info("Starting scheduler standalone (press Ctrl+C to exit)…")
     start()
     try:
         # Keep the script alive
-        import time
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
-        log.info("KeyboardInterrupt received; exiting scheduler.")
+        log.info("KeyboardInterrupt received; exiting.")
+        _shutdown()

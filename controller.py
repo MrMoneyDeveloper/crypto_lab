@@ -27,6 +27,8 @@ REQUIRED_PKGS = [
     "statsmodels",
     "python-dotenv",
     "dash-iconify",
+    "matplotlib",    # for PDF report generation
+
 ]
 
 _missing = [p for p in REQUIRED_PKGS if importlib.util.find_spec(p) is None]
