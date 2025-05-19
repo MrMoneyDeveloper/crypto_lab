@@ -28,7 +28,10 @@ REQUIRED_PKGS = [
     "python-dotenv",
     "dash-iconify",
     "matplotlib",
+    "statsforecast",
+    "prometheus-client",
 ]
+
 
 _missing = [p for p in REQUIRED_PKGS if importlib.util.find_spec(p) is None]
 if _missing:
