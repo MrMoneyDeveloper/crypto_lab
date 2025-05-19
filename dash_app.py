@@ -126,7 +126,7 @@ app.layout = html.Div(
             html.P(
                 "This dashboard updates automatically every minute. "
                 "Use it to visualize short-term trends and make informed decisions.",
-                style={"color": "#575656", "textAlign": "center", "padding": "1rem 2rem"},
+                style={"color": "rgb(102, 102, 102)", "textAlign": "center", "padding": "1rem 2rem"},
             ),
             style={"backgroundColor": "rgba(0,0,0,0.3)"},
         ),
