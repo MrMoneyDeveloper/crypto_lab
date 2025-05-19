@@ -1,4 +1,5 @@
-## Crypto-Lab
+
+# Crypto-Lab
 
 ## Project Structure
 
@@ -39,145 +40,132 @@ Crypto-Lab/
 └── venv/
 ```
 
-* **`api/`**
-  * `app.py` & `middleware.py`: expose `/api/data/<coin>` endpoints for historical and forecast data.
-* **`core/`**
-  * `data_tools.py`: data ingestion and transformation utilities.
-  * `forecast.py`: 24-hour forecasting (AutoARIMA via statsforecast, with Holt–Winters fallback).
-* **`data_pipeline/`**
-  * `data_pipeline.py`: fetch BTC/ETH prices, build pandas DataFrames, write Parquet via PyArrow.
-  * `scheduler.py`: schedule regular fetch jobs using APScheduler.
-* **Root scripts**
-  * `controller.py`: orchestrates the pipeline and starts the Flask API.
-  * `dash_app.py`: defines the Dash UI (coin selector, charts, CSV/PDF exports).
-  * `report.py`: generates PDF reports with matplotlib & PdfPages.
+- **`api/`**  
+  - `app.py` & `middleware.py`: expose `/api/data/<coin>` endpoints for historical and forecast data.
+- **`core/`**  
+  - `data_tools.py`: data ingestion and transformation utilities.  
+  - `forecast.py`: 24-hour forecasting (AutoARIMA via statsforecast, with Holt–Winters fallback).
+- **`data_pipeline/`**  
+  - `data_pipeline.py`: fetch BTC/ETH prices, build pandas DataFrames, write Parquet via PyArrow.  
+  - `scheduler.py`: schedule regular fetch jobs using APScheduler.
+- **Root scripts**  
+  - `controller.py`: orchestrates pipeline and launches Flask API.  
+  - `dash_app.py`: defines Dash UI (coin selector, charts, CSV/PDF exports).  
+  - `report.py`: generates PDF reports with matplotlib & PdfPages.
 
 ---
 
 ## Setup and Running on Windows
 
-Follow these steps to get Crypto-Lab working locally on a Windows machine.
+### Prerequisites
+
+1. **Python 3.8+** installed and on your `PATH`.  
+2. **Git** (preferred) or ability to download the ZIP from GitHub.
 
 ---
 
-### 1. Clone the repository
+### 1. Obtain the source
 
-Open PowerShell and run:
-
-```bash
+**Via Git**  
+```powershell
 git clone https://github.com/MrMoneyDeveloper/crypto_lab.git
 cd crypto_lab
 ```
 
-This will download the Crypto-Lab project into a local folder.
+**Via ZIP**  
+1. Download `crypto_lab-main.zip` from GitHub.  
+2. Extract, then:
+   ```powershell
+   cd crypto_lab-main
+   ```
 
 ---
 
-### 2. Create and activate a Python virtual environment
+### 2. Create and activate a virtual environment
 
-Still in the project folder, create a venv and activate it:
-
-```bash
+```powershell
 python -m venv venv
+```
+
+If activation is blocked, bypass execution policy:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process
 .\venv\Scripts\activate
 ```
 
-> After activation, your prompt should show `(venv)`. This isolates the project’s Python packages.
+> After activation, your prompt shows `(venv)`, isolating project packages.
 
 ---
 
 ### 3. Install dependencies
 
-If a `requirements.txt` is included:
+If `requirements.txt` exists:
 
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-Otherwise, install the main libraries manually:
+Otherwise:
 
-```bash
+```powershell
 pip install dash dash-iconify pandas requests pyarrow statsforecast statsmodels matplotlib flask apscheduler python-dotenv
 ```
-
-* **Dash & Dash-Iconify**: web dashboard (Python Dash framework)  
-* **pandas & pyarrow**: data handling (reading/writing price series)  
-* **statsforecast / statsmodels**: forecasting (AutoARIMA, Holt–Winters)  
-* **matplotlib**: generating PDF reports with charts  
-* **Flask & APScheduler**: background API and scheduling pipeline  
-* **python-dotenv**: manage environment variables via a `.env` file  
 
 ---
 
 ### 4. (Optional) Configure environment variables
 
-By default, the app uses:
+Create or edit `.env` in the project root:
 
 ```dotenv
 API_BASE=http://127.0.0.1:5000/api/data
+COINS=bitcoin,ethereum
+REFRESH_INTERVAL=60
 ```
-
-To override defaults, create or edit a `.env` file in the project root and set:
-
-```dotenv
-API_BASE=<your_api_url>
-COINS=<comma_separated_coin_list>
-REFRESH_INTERVAL=<seconds>
-```
-
-No changes are required for basic use.
 
 ---
 
-### 5. Run the data controller and API
+### 5. Run the controller & API
 
-In one terminal (with the venv activated), start the data service:
+Ensure you’re in `crypto_lab` or `crypto_lab-main`:
 
-```bash
+```powershell
 python controller.py
 ```
 
-This will:
-
-* Fetch the latest Bitcoin and Ethereum prices and append them to `data/YYYY-MM-DD/quotes.parquet`.  
-* Start a Flask API server on port 5000, serving endpoints like `http://127.0.0.1:5000/api/data/bitcoin`.  
-
-You should see log messages such as:
-
-```
-Fetched X prices → data/2025-05-19/quotes.parquet
-```
-
-Keep this process running in the background.
+- Fetches BTC/ETH prices → `data/YYYY-MM-DD/quotes.parquet`  
+- Starts Flask API on port 5000:  
+  `http://127.0.0.1:5000/api/data/<coin>`
 
 ---
 
 ### 6. Run the Dash dashboard
 
-Open another terminal (activate the same venv) and run:
+In a new terminal (with venv active):
 
-```bash
+```powershell
 python dash_app.py
 ```
 
-By default, the Dash server listens on port 8050.
+Dash listens on port 8050 by default.
 
 ---
 
-### 7. Open the web dashboard
+### 7. Open the dashboard
 
-In your browser, navigate to:
+Navigate to:
 
 ```
 http://127.0.0.1:8050/
 ```
 
-You should see the Crypto-Lab dashboard UI with:
+Features:
 
-* **Coin selector**  
-* **Price History**  
-* **24h Forecast**  
-* **3-Point Moving Average**  
-* **Volatility**  
+- Coin selector  
+- Price history & 24h forecast  
+- 3-point moving average & volatility charts  
+- **Download CSV** / **Generate PDF**  
 
-The data refreshes every minute automatically. Use **Download CSV** to save the latest historical data, or **Generate PDF** to create a timestamped report.
+Data auto-refreshes every minute.
+
