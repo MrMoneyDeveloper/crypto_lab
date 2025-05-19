@@ -31,6 +31,7 @@ REQUIRED_PKGS = [
     "statsforecast",
     "prometheus-client",
     "Flask-Limiter",
+    "dash-bootstrap-components",
 ]
 
 

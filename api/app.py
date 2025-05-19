@@ -23,6 +23,9 @@ from flask import Flask, abort, jsonify, request
 from flask_cors import CORS
 from prometheus_client import Counter, generate_latest
 
+# ──────────────────────────── Caching ────────────────────────────────────
+from flask_caching import Cache
+
 # ──────────────────────────── Rate Limiting (optional) ───────────────────
 try:
     from flask_limiter import Limiter
@@ -88,6 +91,10 @@ def create_app() -> Flask:
     # CORS for /api/*
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
+    # ─── Cache setup (Simple in-memory, good for single-instance) ─────────────
+    cache = Cache(config={"CACHE_TYPE": "SimpleCache"})
+    cache.init_app(app)
+
     # optional rate-limiter setup
     if _limiter_available:
         limiter = Limiter(
@@ -118,6 +125,7 @@ def create_app() -> Flask:
 
     @app.route("/api/data/<coin>")
     @limit("10 per minute")
+    @cache.cached(timeout=60)  # ← cache each coin’s data+forecast for 60s
     def data_api(coin: str) -> Any:
         """Return last 12h history + 24h forecast for `coin`."""
         if coin not in DEFAULT_COINS:
