@@ -30,6 +30,7 @@ REQUIRED_PKGS = [
     "matplotlib",
     "statsforecast",
     "prometheus-client",
+    "Flask-Limiter",
 ]
 
 

@@ -1,8 +1,8 @@
 """
 24 h price-forecasting for Crypto-Lab.
 
-• _load_hourly_series(coin) → reads all day-partitioned Parquet files,
-  resamples to an hourly UTC series and forward-fills gaps.
+• _load_hourly_series(coin) → reads day-partitioned Parquet (hive style),
+  prunes columns, resamples to an hourly UTC series and forward-fills gaps.
 • Two back-ends
     – statsforecast AutoARIMA  (if available – fast / accurate)
     – statsmodels Holt-Winters (pure-Python fallback)
@@ -20,10 +20,10 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 # ────────────────────────────── configuration ────────────────────────────
-PROJECT_ROOT   = Path(__file__).resolve().parent.parent
-PARQUET_ROOT   = PROJECT_ROOT / "data"       # ← matches pipeline
-_HORIZON       = 24                                     # default steps
-_MIN_POINTS    = 6                                      # min hourly points to fit model
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PARQUET_ROOT = PROJECT_ROOT / "data"        # ← matches pipeline output
+_HORIZON     = 24                           # default forecast steps
+_MIN_POINTS  = 6                            # min hourly points to fit model
 
 log = logging.getLogger("forecast")
 if not log.handlers:
@@ -43,24 +43,32 @@ def _load_hourly_series(coin: str) -> pd.Series:
             f"No parquet store found at {PARQUET_ROOT}. Run fetch_prices() first."
         )
 
+    # 1) Point at your Hive-partitioned dataset
     dataset = ds.dataset(
-        PARQUET_ROOT,
+        source=str(PARQUET_ROOT),
         format="parquet",
-        partitioning="hive",
-        exclude_invalid_files=True,  # ignore NDJSON / misc files
+        partitioning="hive",           # expects folders like coin=bitcoin/date=YYYY-MM-DD/
+        exclude_invalid_files=True,
     )
 
-    table = dataset.to_table(filter=ds.field("coin") == coin)
+    # 2) Read only rows for this coin, and only ts & price columns
+    table = dataset.to_table(
+        filter=ds.field("coin") == coin,
+        columns=["ts", "price"]
+    )
+
     if table.num_rows == 0:
         raise ValueError(f"No rows for coin '{coin}' in parquet store")
 
+    # 3) Convert to Pandas and build an hourly series
     df = table.to_pandas()
     hourly = (
-        df.sort_values("ts")
-          .set_index("ts")["price"]
-          .astype(float)
-          .resample("h")  # lower-case 'h' for hours
-          .ffill()
+        df
+        .set_index("ts")["price"]
+        .sort_index()
+        .astype(float)
+        .resample("H", convention="start")
+        .ffill()
     )
     return hourly
 
@@ -73,10 +81,14 @@ try:
 
     def _forecast(series: pd.Series, horizon: int) -> pd.Series:
         """AutoARIMA (season_length = 24)."""
-        # prepare DataFrame for statsforecast: ds, y and unique_id
-        df_sf = series.to_frame(name="y").reset_index().rename(columns={"ts": "ds"})
+        df_sf = (
+            series
+            .to_frame(name="y")
+            .reset_index()
+            .rename(columns={"ts": "ds"})
+        )
         df_sf["unique_id"] = "series_1"
-        sf = StatsForecast(models=[AutoARIMA(season_length=24)], freq="h")
+        sf = StatsForecast(models=[AutoARIMA(season_length=24)], freq="H")
         sf.fit(df_sf[["unique_id", "ds", "y"]])
         preds = sf.predict(h=horizon)
         return preds.set_index("ds").iloc[:, 0]
@@ -93,7 +105,7 @@ except Exception as exc:
 
     def _forecast(series: pd.Series, horizon: int) -> pd.Series:
         model = ExponentialSmoothing(series, trend="add", damped_trend=True)
-        fit   = model.fit(optimized=True)
+        fit = model.fit(optimized=True)
         return fit.forecast(horizon)
 
 # ────────────────────────────── public API ───────────────────────────────
@@ -104,23 +116,24 @@ def forecast_24h(
 ) -> Tuple[List[float], List[str]]:
     """
     Produce a *horizon*-step forecast for *coin*.
-    Returns  (prices_list, iso_ts_list)
+    Returns (prices_list, iso_ts_list).
     """
     series = _load_hourly_series(coin)
 
     if series.empty:
         raise ValueError(f"No time-series for '{coin}'")
 
-    # Too little data → repeat last known price
+    # If not enough history, just repeat the last value
     if len(series) < _MIN_POINTS:
-        last = [series.iloc[-1]] * horizon
-        idx  = pd.date_range(
+        last_val = series.iloc[-1]
+        out_vals = [last_val] * horizon
+        out_idx = pd.date_range(
             series.index[-1] + pd.Timedelta(hours=1),
             periods=horizon,
-            freq="h",
+            freq="H",
             tz="UTC",
         )
-        return last, idx.astype(str).tolist()
+        return out_vals, out_idx.astype(str).tolist()
 
     fc = _forecast(series, horizon)
     return fc.tolist(), fc.index.astype(str).tolist()
