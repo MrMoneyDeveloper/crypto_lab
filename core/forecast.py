@@ -1,6 +1,4 @@
 """
-core/forecast.py
-────────────────
 24 h price-forecasting for Crypto-Lab.
 
 • _load_hourly_series(coin) → reads all day-partitioned Parquet files,
@@ -75,9 +73,11 @@ try:
 
     def _forecast(series: pd.Series, horizon: int) -> pd.Series:
         """AutoARIMA (season_length = 24)."""
+        # prepare DataFrame for statsforecast: ds, y and unique_id
         df_sf = series.to_frame(name="y").reset_index().rename(columns={"ts": "ds"})
+        df_sf["unique_id"] = "series_1"
         sf = StatsForecast(models=[AutoARIMA(season_length=24)], freq="h")
-        sf.fit(df_sf[["ds", "y"]])
+        sf.fit(df_sf[["unique_id", "ds", "y"]])
         preds = sf.predict(h=horizon)
         return preds.set_index("ds").iloc[:, 0]
 
