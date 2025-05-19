@@ -1,6 +1,9 @@
-# report.py
-
 from __future__ import annotations
+
+# Use non-interactive backend to allow PDF generation from any thread
+import matplotlib
+matplotlib.use("Agg")
+
 import os
 import logging
 from datetime import datetime
@@ -27,7 +30,6 @@ fmt = logging.Formatter(
 handler.setFormatter(fmt)
 logger.addHandler(handler)
 logger.setLevel(LOG_LEVEL)
-
 
 # ──────────────────────── Public API ─────────────────────────────────────
 
@@ -124,7 +126,6 @@ def generate_report(coin: str) -> str:
 
     except Exception as exc:
         logger.error(f"Error while building PDF: {exc!s}")
-        # If partially written, you might remove the file here
         if os.path.exists(pdf_path):
             try:
                 os.remove(pdf_path)
