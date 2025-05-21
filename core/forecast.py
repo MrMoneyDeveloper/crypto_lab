@@ -1,18 +1,27 @@
 """
-24 h price-forecasting for Crypto-Lab.
+24-hour price forecasting for Crypto-Lab (v2, May 2025)
 
-• _load_hourly_series(coin) → reads day-partitioned Parquet (hive style),
-  prunes columns, resamples to an hourly UTC series and forward-fills gaps.
-• Two back-ends
-    – statsforecast AutoARIMA  (if available – fast / accurate)
-    – statsmodels Holt-Winters (pure-Python fallback)
-• forecast_24h(coin, horizon=24) → (yhat_list, ts_list)
+Key upgrades 🚀
+────────────────
+1. **Single Arrow dataset** kept in memory → avoids rebuilding a dataset on
+   every call.
+2. **LRU-cached forecasts** (per–coin, per-horizon) → reuses model output for
+   repeated UI refreshes.
+3. **Graceful fallback**: when *coin* is missing/unknown we silently use
+   `bitcoin` instead of raising.
+4. Same dual back-end strategy (StatsForecast AutoARIMA → Holt-Winters).
+
+Public surface stays: `forecast_24h(coin=None, horizon=24)` → `(yhat, ts)`.
+
+To clear cached forecasts after a successful data ingest → call
+`clear_cache()` from your scheduler.
 """
 
 from __future__ import annotations
 
 import logging
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Tuple
 
@@ -21,50 +30,46 @@ import pyarrow.dataset as ds
 
 # ────────────────────────────── configuration ────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PARQUET_ROOT = PROJECT_ROOT / "data"        # ← matches pipeline output
-_HORIZON     = 24                           # default forecast steps
-_MIN_POINTS  = 6                            # min hourly points to fit model
+PARQUET_ROOT = PROJECT_ROOT / "data"  # ← matches pipeline output
+_HORIZON: int = 24                    # default forecast steps
+_MIN_POINTS: int = 6                  # min hourly points to fit model
 
 log = logging.getLogger("forecast")
 if not log.handlers:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
+        format="%(asctime)s [%(levelname)s] %(message)s",
     )
+
+# ────────────────────────────── Arrow dataset cache ───────────────────────
+if not PARQUET_ROOT.exists():
+    raise FileNotFoundError(
+        f"No parquet store found at {PARQUET_ROOT}. Run fetch_prices() first."
+    )
+
+_DATASET = ds.dataset(
+    source=str(PARQUET_ROOT),
+    format="parquet",
+    partitioning="hive",  # expects coin=bitcoin/date=YYYY-MM-DD/
+    exclude_invalid_files=True,
+)
 
 # ────────────────────────────── data helper ──────────────────────────────
+
 def _load_hourly_series(coin: str) -> pd.Series:
-    """
-    Return a forward-filled hourly price series for *coin*.
-    Raises if the parquet store is missing or the coin is unknown.
-    """
-    if not PARQUET_ROOT.exists():
-        raise FileNotFoundError(
-            f"No parquet store found at {PARQUET_ROOT}. Run fetch_prices() first."
-        )
+    """Return a forward-filled hourly price series for *coin*."""
 
-    # 1) Point at your Hive-partitioned dataset
-    dataset = ds.dataset(
-        source=str(PARQUET_ROOT),
-        format="parquet",
-        partitioning="hive",           # expects folders like coin=bitcoin/date=YYYY-MM-DD/
-        exclude_invalid_files=True,
-    )
-
-    # 2) Read only rows for this coin, and only ts & price columns
-    table = dataset.to_table(
+    table = _DATASET.to_table(
         filter=ds.field("coin") == coin,
-        columns=["ts", "price"]
+        columns=["ts", "price"],
     )
 
     if table.num_rows == 0:
         raise ValueError(f"No rows for coin '{coin}' in parquet store")
 
-    # 3) Convert to Pandas and build an hourly series
     df = table.to_pandas()
     hourly = (
-        df
-        .set_index("ts")["price"]
+        df.set_index("ts")["price"]
         .sort_index()
         .astype(float)
         .resample("H", convention="start")
@@ -74,16 +79,16 @@ def _load_hourly_series(coin: str) -> pd.Series:
 
 # ────────────────────────────── model back-ends ──────────────────────────
 try:
-    from statsforecast import StatsForecast            # type: ignore
-    from statsforecast.models import AutoARIMA         # type: ignore
+    from statsforecast import StatsForecast  # type: ignore
+    from statsforecast.models import AutoARIMA  # type: ignore
 
     _USING_STATSFORECAST = True
 
     def _forecast(series: pd.Series, horizon: int) -> pd.Series:
-        """AutoARIMA (season_length = 24)."""
+        """StatsForecast AutoARIMA (season_length=24)."""
+
         df_sf = (
-            series
-            .to_frame(name="y")
+            series.to_frame(name="y")
             .reset_index()
             .rename(columns={"ts": "ds"})
         )
@@ -93,7 +98,7 @@ try:
         preds = sf.predict(h=horizon)
         return preds.set_index("ds").iloc[:, 0]
 
-except Exception as exc:
+except Exception as exc:  # pragma: no cover – import fall-back
     warnings.warn(
         f"statsforecast unavailable ({exc}); using statsmodels Holt-Winters",
         RuntimeWarning,
@@ -108,41 +113,61 @@ except Exception as exc:
         fit = model.fit(optimized=True)
         return fit.forecast(horizon)
 
-# ────────────────────────────── public API ───────────────────────────────
-def forecast_24h(
-    coin: str,
-    *,
-    horizon: int = _HORIZON
-) -> Tuple[List[float], List[str]]:
-    """
-    Produce a *horizon*-step forecast for *coin*.
-    Returns (prices_list, iso_ts_list).
-    """
+# ────────────────────────────── caching layer ────────────────────────────
+
+@lru_cache(maxsize=32)
+def _cached_forecast(coin: str, horizon: int) -> Tuple[List[float], List[str]]:
+    """Internal helper: return cached forecast arrays."""
     series = _load_hourly_series(coin)
 
-    if series.empty:
-        raise ValueError(f"No time-series for '{coin}'")
-
-    # If not enough history, just repeat the last value
+    # Not enough history? → flat-line forecast
     if len(series) < _MIN_POINTS:
-        last_val = series.iloc[-1]
-        out_vals = [last_val] * horizon
+        last_val = float(series.iloc[-1])
         out_idx = pd.date_range(
             series.index[-1] + pd.Timedelta(hours=1),
             periods=horizon,
             freq="H",
             tz="UTC",
         )
-        return out_vals, out_idx.astype(str).tolist()
+        return [last_val] * horizon, out_idx.astype(str).tolist()
 
     fc = _forecast(series, horizon)
     return fc.tolist(), fc.index.astype(str).tolist()
 
+
+def clear_cache() -> None:
+    """Expose a manual cache-clear for the ETL pipeline."""
+    _cached_forecast.cache_clear()
+
+# ────────────────────────────── public API ───────────────────────────────
+
+
+def forecast_24h(
+    coin: str | None = None,
+    *,
+    horizon: int = _HORIZON,
+) -> Tuple[List[float], List[str]]:
+    """Return a *horizon*-step forecast for *coin* (defaults → bitcoin)."""
+
+    if not coin:
+        coin = "bitcoin"
+
+    try:
+        return _cached_forecast(coin, horizon)
+    except ValueError:
+        # Unknown coin – fallback once to bitcoin
+        if coin != "bitcoin":
+            log.warning("Coin '%s' not found, falling back to 'bitcoin'", coin)
+            return _cached_forecast("bitcoin", horizon)
+        raise  # bitcoin itself missing → let caller know!
+
 # ────────────────────────────── CLI smoke-test ───────────────────────────
 if __name__ == "__main__":  # pragma: no cover
-    coin = "bitcoin"
-    yhat, ts = forecast_24h(coin)
-    print(coin, "→ model used:",
-          "AutoARIMA" if _USING_STATSFORECAST else "Holt-Winters")
-    for t, v in zip(ts, yhat):
-        print(f"{t} → {v:.2f}")
+    _coin = "bitcoin"
+    _yhat, _ts = forecast_24h(_coin)
+    print(
+        _coin,
+        "→ model:", "AutoARIMA" if _USING_STATSFORECAST else "Holt-Winters",
+    )
+    for _t, _v in zip(_ts, _yhat):
+        print(f"{_t} → {_v:.2f}")

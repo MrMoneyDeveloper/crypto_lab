@@ -1,135 +1,161 @@
+#!/usr/bin/env python
+"""crypto_report.py – build a one-page PDF for any crypto asset.
+
+Major changes vs. previous snippet
+----------------------------------
+* **Optional output_dir** – Dash can still call `generate_report(coin)`.
+* **Self-cleanup** – incomplete PDFs are deleted on failure.
+* **Consistent UTC** – ISO timestamps everywhere.
+* **Future-proof** – updated CLI defaults & typing.
+"""
 from __future__ import annotations
 
-# Use non-interactive backend to allow PDF generation from any thread
-import matplotlib
-matplotlib.use("Agg")
-
-import os
+import argparse
 import logging
-from datetime import datetime
-from typing import Optional
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Tuple
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import requests
-from matplotlib.backends.backend_pdf import PdfPages
+# ────────────────────────── Matplotlib (headless) ─────────────────────────
+import matplotlib
 
-# ─────────────────────────── Configuration ────────────────────────────────
+matplotlib.use("Agg")  # must precede pyplot import
 
-API_BASE    = os.getenv("API_BASE", "http://127.0.0.1:5000/api/data")
-OUTPUT_DIR  = os.getenv("REPORT_DIR", "/mnt/data")  # ensure this exists or create it
-LOG_LEVEL   = os.getenv("REPORT_LOG_LEVEL", "INFO").upper()
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
+import requests  # noqa: E402
+from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 
-# ─────────────────────────── Logging Setup ───────────────────────────────
+# ───────────────────────────── Config ─────────────────────────────────────
+API_BASE: str = os.getenv("API_BASE", "http://127.0.0.1:5000/api/data")
+OUTPUT_DIR_ENV: str = os.getenv("REPORT_DIR", ".")
+LOG_LEVEL: str = os.getenv("REPORT_LOG_LEVEL", "INFO").upper()
+API_TIMEOUT: float = float(os.getenv("API_TIMEOUT", "10"))  # seconds
 
-logger = logging.getLogger("report")
-handler = logging.StreamHandler()
-fmt = logging.Formatter(
-    '{"time":"%(asctime)s","level":"%(levelname)s","module":"report","message":%(message)s}'
-)
-handler.setFormatter(fmt)
-logger.addHandler(handler)
+# ───────────────────────────── Logging ────────────────────────────────────
+logger = logging.getLogger("crypto_report")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
 logger.setLevel(LOG_LEVEL)
 
-# ──────────────────────── Public API ─────────────────────────────────────
+# ─────────────────────────── HTTP fetch ───────────────────────────────────
 
-def generate_report(coin: str) -> str:
+def fetch_coin_data(session: requests.Session, coin: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return `(history_df, forecast_df)` with UTC ts + price columns."""
+    url = f"{API_BASE.rstrip('/')}/{coin.lower()}"
+    t0 = time.perf_counter()
+    resp = session.get(url, timeout=API_TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    hist = pd.DataFrame(payload["history"])
+    fc = pd.DataFrame(payload["forecast"])
+
+    for df, name in ((hist, "history"), (fc, "forecast")):
+        if not {"ts", "price"}.issubset(df.columns):
+            raise ValueError(f"{name} missing ts/price columns")
+        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        df.sort_values("ts", inplace=True, ignore_index=True)
+
+    logger.info("Fetched %s data in %.0f ms", coin.upper(), (time.perf_counter() - t0) * 1000)
+    return hist, fc
+
+# ─────────────────────────── Plot helpers ────────────────────────────────
+
+def _plot(pdf: PdfPages, df: pd.DataFrame, title: str, *, dash: Optional[Tuple[int, int]] = None) -> None:
+    plt.figure(figsize=(8, 4))
+    kwargs = {"linewidth": 2}
+    if dash:
+        kwargs["dashes"] = dash
+    plt.plot(df["ts"], df["price"], **kwargs)
+    plt.title(title)
+    plt.xticks(rotation=30)
+    plt.tight_layout()
+    pdf.savefig()
+    plt.close()
+    logger.debug("Chart added: %s", title)
+
+# ───────────────────────── PDF builder ────────────────────────────────────
+
+def _build_pdf(coin: str, hist: pd.DataFrame, fc: pd.DataFrame, pdf_path: Path) -> None:
+    with PdfPages(pdf_path) as pdf:
+        # Title page
+        plt.figure(figsize=(8, 6))
+        plt.axis("off")
+        title = f"{coin.upper()} Report\n{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
+        plt.text(0.5, 0.5, title, ha="center", va="center", fontsize=22)
+        pdf.savefig()
+        plt.close()
+
+        _plot(pdf, hist.tail(12), "Price History (last 12 h)")
+        _plot(pdf, fc, "24 h Forecast", dash=(4, 2))
+
+        ma = hist.set_index("ts")["price"].rolling(3).mean().reset_index()
+        _plot(pdf, ma, "3-Point Moving Average")
+
+        vol = (
+            hist.set_index("ts")["price"].pct_change().rolling(3).std() * (365 * 24) ** 0.5
+        ).reset_index()
+        _plot(pdf, vol, "Annualised Volatility (3 pt)")
+
+    logger.info("PDF written → %s", pdf_path)
+
+# ─────────────────────── Orchestrator ─────────────────────────────────────
+
+def generate_report(coin: str, output_dir: Path | str | None = None) -> Path:
+    """High-level helper callable from Dash, CLI, or Celery.
+
+    Parameters
+    ----------
+    coin : str
+        Crypto symbol (e.g. "bitcoin", "btc"). Case-insensitive.
+    output_dir : Path | str | None, optional
+        Directory to write the PDF. Defaults to `$REPORT_DIR` env variable
+        (or current working directory if not set).
     """
-    Fetches history + forecast for `coin`, then creates a PDF
-    at OUTPUT_DIR containing:
-      1) Title page
-      2) Price history
-      3) 24h forecast
-      4) 3-point moving average
-      5) Annualized volatility
-    Returns the path to the generated PDF.
-    Raises on failure.
-    """
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-    pdf_name = f"{coin}_report_{timestamp}.pdf"
-    pdf_path = os.path.join(OUTPUT_DIR, pdf_name)
+    if output_dir is None:
+        output_dir = OUTPUT_DIR_ENV
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    pdf_path = output_dir / f"{coin.lower()}_report_{stamp}.pdf"
 
     try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        logger.info(f'Generating report for "{coin}", output → {pdf_path}')
-    except Exception as exc:
-        logger.error(f'Could not create report directory "{OUTPUT_DIR}": {exc!s}')
-        raise
-
-    # 1) Fetch data
-    try:
-        resp = requests.get(f"{API_BASE}/{coin}", timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
-        logger.info(f"Fetched API data for {coin}")
-    except Exception as exc:
-        logger.error(f"Failed to fetch data for {coin}: {exc!s}")
-        raise
-
-    try:
-        hist = pd.DataFrame(payload["history"])
-        hist["ts"] = pd.to_datetime(hist["ts"])
-        fc   = pd.DataFrame(payload["forecast"])
-        fc["ts"]   = pd.to_datetime(fc["ts"])
-    except Exception as exc:
-        logger.error(f"Malformed API response for {coin}: {exc!s}")
-        raise
-
-    # 2) Build PDF
-    try:
-        with PdfPages(pdf_path) as pdf:
-            # Title page
-            plt.figure(figsize=(8, 6))
-            plt.axis("off")
-            title = f"{coin.capitalize()} Report\n{datetime.utcnow():%Y-%m-%d %H:%M UTC}"
-            plt.text(0.5, 0.5, title, ha="center", va="center", fontsize=20)
-            pdf.savefig()
-            plt.close()
-            logger.info("Added title page")
-
-            # Helper to render a timeseries
-            def _render(df: pd.DataFrame, ycol: str, title: str, color: str, dash: Optional[tuple] = None):
-                plt.figure(figsize=(8, 4))
-                style = {} if dash is None else {"dashes": dash}
-                plt.plot(df["ts"], df[ycol], color=color, linewidth=2, **style)
-                plt.title(title)
-                plt.xticks(rotation=30)
-                plt.tight_layout()
-                pdf.savefig()
-                plt.close()
-                logger.info(f"Added chart: {title}")
-
-            # Price history
-            _render(hist, "price", "Price History (last 12h)", "#1f77b4")
-
-            # Forecast
-            _render(fc, "price", "24h Forecast", "#ff7f0e", dash=(5, 2))
-
-            # 3-point MA
-            ma = hist["price"].rolling(3).mean()
-            hist_ma = hist.assign(price=ma)
-            _render(hist_ma, "price", "3-Point Rolling Moving Average", "#2ca02c")
-
-            # Annualized volatility
-            vol = (
-                hist["price"]
-                .pct_change()
-                .rolling(3)
-                .std()
-                .mul((365 * 24) ** 0.5)
-            )
-            hist_vol = hist.assign(price=vol)
-            _render(hist_vol, "price", "Annualized Volatility (3-pt)", "#d62728")
-
-        logger.info(f"Report successfully written to {pdf_path}")
+        with requests.Session() as session:
+            hist, fc = fetch_coin_data(session, coin)
+        _build_pdf(coin, hist, fc, pdf_path)
         return pdf_path
 
     except Exception as exc:
-        logger.error(f"Error while building PDF: {exc!s}")
-        if os.path.exists(pdf_path):
+        # Remove partial file if something exploded mid-write
+        if pdf_path.exists():
             try:
-                os.remove(pdf_path)
-                logger.info("Removed incomplete report file")
-            except Exception:
+                pdf_path.unlink()
+            except OSError:
                 pass
         raise
+
+# ─────────────────────────── CLI entry ───────────────────────────────────
+
+def _cli(argv: list[str] | None = None) -> None:  # pragma: no cover
+    parser = argparse.ArgumentParser(description="Generate a crypto PDF report")
+    parser.add_argument("coin", help="Ticker symbol, e.g. btc, eth")
+    parser.add_argument("-o", "--output-dir", type=Path, help="Directory for the PDF (defaults to $REPORT_DIR)")
+    args = parser.parse_args(argv)
+
+    try:
+        out = generate_report(args.coin, args.output_dir)
+        logger.info("Done → %s", out)
+    except Exception as exc:
+        logger.exception("Failed: %s", exc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _cli()

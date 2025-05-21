@@ -1,8 +1,3 @@
-# core/data_tools.py
-"""
-Helpers to transform price data for analytics: conversion, smoothing, filtering.
-"""
-
 from __future__ import annotations
 
 """
@@ -11,7 +6,7 @@ core/data_tools.py
 Helpers to transform and analyze price time series:
   - Currency conversion
   - Rolling smoothing
-  - Date‐range filtering
+  - Date-range filtering
   - Returns & volatility calculation
 """
 
@@ -28,19 +23,37 @@ __all__ = [
 ]
 
 
-def convert_currency(df: DataFrame, rate: float, price_col: str = "price") -> DataFrame:
+def convert_currency(
+    df: DataFrame,
+    rate: float,
+    price_col: str = "price",
+    new_col: str | None = None,
+) -> DataFrame:
     """
     Convert a price column to another currency by a given rate.
 
-    Adds a new column "<price_col>_converted".
+    Parameters:
+    - df: Source DataFrame containing a numeric price column.
+    - rate: Conversion rate to apply (target per base unit).
+    - price_col: Name of the existing price column.
+    - new_col: Optional name for the converted column. Defaults to '<price_col>_converted'.
 
-    Raises KeyError if the source column is missing.
+    Returns:
+    A new DataFrame with the converted price column added.
+
+    Raises:
+    KeyError: If `price_col` is not present in `df`.
+    ValueError: If `rate` is non-positive.
     """
-    if price_col not in df:
-        raise KeyError(f"DataFrame must contain '{price_col}'")
-    result = df.copy()
-    result[f"{price_col}_converted"] = result[price_col].astype(float) * rate
-    return result
+    if price_col not in df.columns:
+        raise KeyError(f"Missing column: '{price_col}'")
+    if rate <= 0:
+        raise ValueError("Conversion rate must be positive")
+
+    out = df.copy()
+    col_name = new_col or f"{price_col}_converted"
+    out[col_name] = out[price_col].astype(float) * rate
+    return out
 
 
 def smooth_prices(
@@ -48,69 +61,109 @@ def smooth_prices(
     window: int = 5,
     column: str = "price",
     min_periods: int | None = 1,
+    center: bool = False,
 ) -> DataFrame:
     """
-    Add a rolling-mean smoothing column named "<column>_smooth".
+    Add a rolling-mean smoothing column named '<column>_smoothed'.
 
-    - window: number of periods in the rolling window.
-    - min_periods: minimum observations before computing a value.
+    Parameters:
+    - df: DataFrame with numeric time series data.
+    - window: Size of the rolling window (>=1).
+    - column: Column to smooth.
+    - min_periods: Minimum observations required to compute a value.
+    - center: Whether the window is centered on each label.
+
+    Returns:
+    A new DataFrame with '<column>_smoothed' appended.
+
+    Raises:
+    KeyError: If `column` is missing.
+    ValueError: If `window` < 1.
     """
     if window < 1:
         raise ValueError("window must be >= 1")
-    if column not in df:
-        raise KeyError(f"DataFrame must contain '{column}'")
-    result = df.copy()
-    smooth_col = f"{column}_smooth"
-    result[smooth_col] = (
-        result[column]
+    if column not in df.columns:
+        raise KeyError(f"Missing column: '{column}'")
+
+    out = df.copy()
+    smooth_col = f"{column}_smoothed"
+    out[smooth_col] = (
+        out[column]
         .astype(float)
-        .rolling(window=window, min_periods=min_periods)
+        .rolling(window=window, min_periods=min_periods, center=center)
         .mean()
     )
-    return result
+    return out
 
 
 def filter_date_range(
     df: DataFrame,
     start: Union[str, pd.Timestamp],
     end: Union[str, pd.Timestamp],
-    column: str = "ts",
+    ts_col: str = "ts",
+    inclusive: str = "both",
 ) -> DataFrame:
     """
-    Return rows where `column` (datetime-like) lies between [start, end], inclusive.
+    Filter rows where a datetime column lies within [start, end].
 
-    Parses strings to UTC timestamps.
+    Parameters:
+    - df: DataFrame containing datetime data.
+    - start: Lower bound (inclusive) timestamp or string.
+    - end: Upper bound (inclusive) timestamp or string.
+    - ts_col: Name of the datetime-like column.
+    - inclusive: "both", "left", "right", or "neither".
+
+    Returns:
+    Filtered DataFrame, index reset.
+
+    Raises:
+    KeyError: If `ts_col` is missing.
     """
-    if column not in df:
-        raise KeyError(f"DataFrame must contain '{column}'")
-    result = df.copy()
-    result[column] = pd.to_datetime(result[column], utc=True)
+    if ts_col not in df.columns:
+        raise KeyError(f"Missing column: '{ts_col}'")
+
+    out = df.copy()
+    out[ts_col] = pd.to_datetime(out[ts_col], utc=True)
     start_ts = pd.to_datetime(start, utc=True)
     end_ts = pd.to_datetime(end, utc=True)
-    mask = (result[column] >= start_ts) & (result[column] <= end_ts)
-    return result.loc[mask].reset_index(drop=True)
+
+    mask = out[ts_col].between(start_ts, end_ts, inclusive=inclusive)
+    return out.loc[mask].reset_index(drop=True)
 
 
 def compute_returns(
     df: DataFrame,
     column: str = "price",
     periods: int = 1,
+    new_col: str | None = None,
 ) -> DataFrame:
     """
-    Compute simple returns over `periods` steps:
+    Compute simple returns over a number of periods:
 
       return_t = (price_t / price_{t-periods}) - 1
 
-    Adds a new column "<column>_returns".
+    Parameters:
+    - df: Source DataFrame.
+    - column: Column to compute returns on.
+    - periods: Number of periods for difference (>=1).
+    - new_col: Optional name for the returns column.
+
+    Returns:
+    DataFrame with returns column added.
+
+    Raises:
+    KeyError: If `column` is missing.
+    ValueError: If `periods` < 1.
     """
     if periods < 1:
         raise ValueError("periods must be >= 1")
-    if column not in df:
-        raise KeyError(f"DataFrame must contain '{column}'")
-    result = df.copy()
-    ret_col = f"{column}_returns"
-    result[ret_col] = result[column].astype(float).pct_change(periods=periods)
-    return result
+    if column not in df.columns:
+        raise KeyError(f"Missing column: '{column}'")
+
+    out = df.copy()
+    ret_col = new_col or f"{column}_returns"
+    out[ret_col] = out[column].astype(float).pct_change(periods=periods)
+    return out
 
 
 def compute_volatility(
@@ -119,23 +172,38 @@ def compute_volatility(
     window: int = 10,
     annualize: bool = True,
     freq_hours: int = 1,
+    new_col: str | None = None,
 ) -> DataFrame:
     """
-    Compute rolling volatility (standard deviation) of returns.
+    Compute rolling volatility (std deviation) of returns.
 
-    - Uses `window` periods of `return_col`.
-    - If `annualize`, multiplies by sqrt(8760 / freq_hours).
-    Adds a new column "<return_col>_vol".
+    Parameters:
+    - df: DataFrame with return series.
+    - return_col: Column containing returns.
+    - window: Rolling window size (>=1).
+    - annualize: Whether to scale by sqrt(annual periods).
+    - freq_hours: Hours between observations.
+    - new_col: Optional name for volatility column.
+
+    Returns:
+    DataFrame with volatility column added.
+
+    Raises:
+    KeyError: If `return_col` is missing.
+    ValueError: If `window` < 1.
     """
     if window < 1:
         raise ValueError("window must be >= 1")
-    if return_col not in df:
-        raise KeyError(f"DataFrame must contain '{return_col}'")
-    result = df.copy()
-    vol_col = f"{return_col}_vol"
-    vol = result[return_col].rolling(window=window).std()
+    if return_col not in df.columns:
+        raise KeyError(f"Missing column: '{return_col}'")
+
+    out = df.copy()
+    vol_col = new_col or f"{return_col}_vol"
+    vol_series = out[return_col].rolling(window=window).std()
+
     if annualize:
         annual_factor = (365 * 24) / freq_hours
-        vol = vol * annual_factor**0.5
-    result[vol_col] = vol
-    return result
+        vol_series *= annual_factor ** 0.5
+
+    out[vol_col] = vol_series
+    return out

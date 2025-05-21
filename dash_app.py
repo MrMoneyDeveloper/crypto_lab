@@ -65,20 +65,34 @@ app.layout = html.Div(
         html.Div(id="toast-container"),
 
         # HEADER
-        html.Header(
-            [
-                DashIconify(icon="logos:bitcoin", width=30,
-                            style={"marginRight": "0.5rem", "color": "#f2a900"}),
-                html.Span("Crypto-Lab Dashboard",
-                          style={"fontSize": "1.5rem", "color": "#fff", "fontWeight": "600"}),
-            ],
+html.Header(
+    children=[
+        DashIconify(
+            icon="logos:bitcoin",
+            width=30,
             style={
-                "display": "flex", "alignItems": "center",
-                "padding": "0.75rem 2rem", "backgroundColor": "rgba(0,0,0,0.7)",
-                "borderBottom": "1px solid rgba(255,255,255,0.2)",
-                "backdropFilter": "blur(4px)",
+                "marginRight": "0.5rem",
+                "color": "#f2a900",
             },
         ),
+        html.Span(
+            "Crypto-Lab Dashboard",
+            style={
+                "fontSize": "1.5rem",
+                "color": "#fff",
+                "fontWeight": "600",
+            },
+        ),
+    ],
+    style={
+        "display":         "flex",
+        "alignItems":      "center",
+        "padding":         "0.75rem 2rem",
+        "backgroundColor": "rgba(0, 0, 0, 0.7)",
+        "borderBottom":    "1px solid rgba(255, 255, 255, 0.2)",
+        "backdropFilter":  "blur(4px)",
+    },
+),
 
         # HERO INTRO
         html.Div(

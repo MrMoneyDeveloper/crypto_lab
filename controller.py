@@ -14,6 +14,11 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+import os
+
+# load .env early
+from dotenv import load_dotenv  # type: ignore
+load_dotenv()
 
 REQUIRED_PKGS = [
     "requests",
@@ -32,8 +37,9 @@ REQUIRED_PKGS = [
     "prometheus-client",
     "Flask-Limiter",
     "dash-bootstrap-components",
+    "flask_caching",
+    "flask-cors",
 ]
-
 
 _missing = [p for p in REQUIRED_PKGS if importlib.util.find_spec(p) is None]
 if _missing:
@@ -53,14 +59,14 @@ from time import sleep
 # Project imports                                                             #
 # ----------------------------------------------------------------------------#
 try:
-    # Package layout  (data_pipeline/…)
+    # Package layout (data_pipeline/…)
     from data_pipeline.data_pipeline import fetch_prices
 except ImportError:
     # Flat single-script fallback
     from data_pipeline import fetch_prices  # type: ignore
 
-# Dash UI module – only imported, not executed yet
-import dash_app  # local file dash_app.py
+# Import Dash app so it's registered but not run yet
+import dash_app  # your dash front-end
 
 # ----------------------------------------------------------------------------#
 # Logging                                                                     #
@@ -81,17 +87,23 @@ log = logging.getLogger("controller")
 # ----------------------------------------------------------------------------#
 def run_flask() -> None:
     """Run the Flask API (blocking)."""
-    from api.app import app  # delayed import: waits for bootstrap
-    # Enable CORS so Dash can always call it
-    from flask_cors import CORS
-    CORS(app)
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
-
+    from api.app import app
+    # everything (CORS, rate-limits, etc.) is configured in api/app.py
+    app.run(
+        host="127.0.0.1",
+        port=int(os.getenv("PORT", "5000")),
+        debug=False,
+        use_reloader=False,
+    )
 
 def run_dash() -> None:
     """Run the Dash dashboard (blocking)."""
-    dash_app.app.run(debug=False, port=8050, use_reloader=False)
-
+    dash_app.app.run(
+        host="127.0.0.1",
+        port=8050,
+        debug=False,
+        use_reloader=False,
+    )
 
 # ----------------------------------------------------------------------------#
 # Main                                                                        #
@@ -106,10 +118,10 @@ def main() -> None:
     except Exception:
         log.exception("Initial price fetch failed")
 
-    # 2️⃣ Start the Flask API first
+    # 2️⃣ Start the Flask API
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    log.info("Flask API thread started (http://127.0.0.1:5000)")
+    log.info("Flask API thread started (http://127.0.0.1:%s)", os.getenv("PORT", "5000"))
 
     # Give the API a moment to bind
     sleep(1)
@@ -119,31 +131,25 @@ def main() -> None:
     dash_thread.start()
     log.info("Dash UI thread started (http://127.0.0.1:8050)")
 
-    # 4️⃣ Open browser to the Dash dashboard; retry once if it fails immediately
-    for attempt in range(1, 3):
+    # 4️⃣ Open browser to the Dash dashboard
+    for attempt in range(2):
         try:
             webbrowser.open("http://127.0.0.1:8050/")
             log.info("Browser window launched (Dash dashboard)")
             break
         except Exception:
-            log.warning("Could not open browser (attempt %d)", attempt)
+            log.warning("Could not open browser (attempt %d)", attempt + 1)
             sleep(1)
 
     # 5️⃣ Keep main thread alive until CTRL+C
     try:
-        while True:
-            if not flask_thread.is_alive():
-                log.error("Flask thread died unexpectedly")
-                break
-            if not dash_thread.is_alive():
-                log.error("Dash thread died unexpectedly")
-                break
+        while flask_thread.is_alive() and dash_thread.is_alive():
             sleep(2)
+        log.error("One of the threads died – shutting down")
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt – shutting down")
     finally:
         log.info("=== Controller exit ===")
-
 
 if __name__ == "__main__":
     main()

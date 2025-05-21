@@ -4,98 +4,73 @@ from __future__ import annotations
 Flask entry-point for Crypto-Lab.
 Run directly with:
     python api/app.py
-The controller imports the same `app` symbol for threaded launch.
 """
 
-# ──────────────────────────── Environment ────────────────────────────────
-from dotenv import load_dotenv  # type: ignore
-load_dotenv()  # populate os.environ early
-
-import importlib.util
-import logging
 import math
 import os
+import importlib.util
 from pathlib import Path
 from typing import Any, List
 
-import pandas as pd
+from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request
+from flask_caching import Cache
 from flask_cors import CORS
 from prometheus_client import Counter, generate_latest
 
-# ──────────────────────────── Caching ────────────────────────────────────
-from flask_caching import Cache
+# ─────────────────────────── Environment ────────────────────────────────
+load_dotenv()
 
-# ──────────────────────────── Rate Limiting (optional) ───────────────────
+DEFAULT_COINS  = os.getenv("COINS", "bitcoin,ethereum").lower().split(",")
+CURRENCY       = os.getenv("CURRENCY", "usd").lower()
+DATA_DIR       = os.getenv("DATA_DIR", "./data")
+FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "60"))
+TIMEOUT        = int(os.getenv("TIMEOUT", "10"))
+MAX_RETRIES    = int(os.getenv("MAX_RETRIES", "3"))
+BACKOFF_S      = float(os.getenv("BACKOFF_S", "2"))
+
+# ───────────────────── Optional rate-limiter ────────────────────────────
 try:
     from flask_limiter import Limiter
     from flask_limiter.util import get_remote_address
     _limiter_available = True
 except ImportError:
     _limiter_available = False
-    logging.getLogger("app").warning(
-        "Flask-Limiter not installed; continuing without rate limiting"
-    )
 
-# ──────────────────────────── Project imports ────────────────────────────
-# Scheduler (resilient import)
+# ───────────────────── Scheduler dynamic import ─────────────────────────
 try:
-    from data_pipeline.scheduler import start as start_scheduler  # type: ignore
+    from data_pipeline.scheduler import start as start_scheduler
 except ModuleNotFoundError:
     spec = importlib.util.spec_from_file_location(
         "data_pipeline.scheduler",
         str(Path(__file__).parent.parent / "data_pipeline" / "scheduler.py"),
     )
-    sched = importlib.util.module_from_spec(spec)  # type: ignore
+    sched = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
-    spec.loader.exec_module(sched)  # type: ignore
-    start_scheduler = sched.start  # type: ignore
+    spec.loader.exec_module(sched)
+    start_scheduler = sched.start
 
-# Core data & forecast
-from data_pipeline.data_pipeline import fetch_prices, load_history  # type: ignore
-from core.data_tools import convert_currency, smooth_prices, filter_date_range  # type: ignore
-from core.forecast import forecast_24h  # type: ignore
+# ────────────────────────── Core logic ──────────────────────────────────
+from data_pipeline.data_pipeline import fetch_prices, load_history               # type: ignore
+from core.data_tools            import convert_currency, smooth_prices, filter_date_range  # type: ignore
+from core.forecast              import forecast_24h                              # type: ignore
+from api.middleware             import init_request_logging
 
-# Middleware
-from api.middleware import init_request_logging
+# ──────────────────────────── Helpers ────────────────────────────────────
+fetch_counter = Counter("price_fetch_total",
+                        "Total number of times fetch_prices() was called")
 
-# ───────────────────────────── Settings ──────────────────────────────────
-DEFAULT_COINS  = os.getenv("COINS", "bitcoin,ethereum").lower().split(",")
-CURRENCY       = os.getenv("CURRENCY", "usd").lower()
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "60"))  # seconds
-
-# ─────────────────────────────── Helpers ─────────────────────────────────
 def _clean(seq: List[float]) -> List[float | None]:
-    """Convert NaN or infinite floats to None for valid JSON."""
-    out: List[float | None] = []
-    for x in seq:
-        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-            out.append(None)
-        else:
-            out.append(x)
-    return out
+    """Replace NaN/Inf with None for JSON serialisation."""
+    return [None if (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else x
+            for x in seq]
 
-# ─────────────────────────────── Metrics ─────────────────────────────────
-fetch_counter = Counter(
-    "price_fetch_total",
-    "Total number of times fetch_prices() was called",
-)
-
-# ───────────────────────────── Flask Factory ─────────────────────────────
+# ─────────────────────────── App factory ────────────────────────────────
 def create_app() -> Flask:
     app = Flask(__name__)
-
-    # structured request logging
     init_request_logging(app)
 
-    # CORS for /api/*
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
-
-    # ─── Cache setup (Simple in-memory, good for single-instance) ─────────────
-    cache = Cache(config={"CACHE_TYPE": "SimpleCache"})
-    cache.init_app(app)
-
-    # optional rate-limiter setup
+    # ───── Rate-limiter (optional) ───────────────────────────────────────
     if _limiter_available:
         limiter = Limiter(
             key_func=get_remote_address,
@@ -107,30 +82,33 @@ def create_app() -> Flask:
         limit  = limiter.limit
         exempt = limiter.exempt
     else:
-        # no-op decorators
-        def limit(rule: str):
-            def decorator(f):
-                return f
+        def limit(rule: str):        # type: ignore
+            def decorator(f): return f
             return decorator
+        def exempt(f): return f      # type: ignore
 
-        def exempt(f):
-            return f
+    # ───── CORS & simple cache ───────────────────────────────────────────
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    cache = Cache(config={"CACHE_TYPE": "SimpleCache"})
+    cache.init_app(app)
 
-    # start scheduler once
+    # ───── Launch background scheduler ───────────────────────────────────
     if not getattr(app, "_scheduler_started", False):
         start_scheduler(interval_sec=FETCH_INTERVAL)
         app._scheduler_started = True
 
-    # ─────────────────────── API Routes ────────────────────────────── #
-
+    # ─────────────────────── API routes ──────────────────────────────────
     @app.route("/api/data/<coin>")
     @limit("10 per minute")
-    @cache.cached(timeout=60)  # ← cache each coin’s data+forecast for 60s
+    @cache.cached(timeout=60)
     def data_api(coin: str) -> Any:
-        """Return last 12h history + 24h forecast for `coin`."""
+        """Full history + 24-hour forecast for a coin."""
         if coin not in DEFAULT_COINS:
-            abort(404, description=f"Unknown coin '{coin}'")
-        df = load_history(coin, hours=12)
+            abort(404, f"Unknown coin '{coin}'")
+
+        # ▶️  Load **all** stored rows (no hours=12 restriction)
+        df = load_history(coin)
+
         yhat, ts_fc = forecast_24h(coin)
         return jsonify({
             "currency": CURRENCY,
@@ -147,15 +125,11 @@ def create_app() -> Flask:
     @app.route("/api/transform/<coin>")
     @limit("10 per minute")
     def transform_api(coin: str) -> Any:
-        """
-        Apply on-the-fly transforms to full history:
-          - ?rate=<float>         → currency conversion
-          - ?window=<int>         → rolling smoothing
-          - ?start=<ts>&end=<ts>  → date-range filter
-        """
         if coin not in DEFAULT_COINS:
-            abort(404, description=f"Unknown coin '{coin}'")
+            abort(404, f"Unknown coin '{coin}'")
+
         df = load_history(coin)
+
         if rate := request.args.get("rate"):
             df = convert_currency(df, float(rate))
         if window := request.args.get("window"):
@@ -163,14 +137,19 @@ def create_app() -> Flask:
         if s := request.args.get("start"):
             if e := request.args.get("end"):
                 df = filter_date_range(df, s, e)
+
         return jsonify(df.to_dict(orient="list"))
 
     @app.route("/api/refresh", methods=["POST"])
     @limit("5 per minute")
     def refresh_api() -> Any:
-        """Manually trigger a live-price fetch."""
         try:
-            df = fetch_prices()
+            df = fetch_prices(
+                timeout=TIMEOUT,
+                max_retries=MAX_RETRIES,
+                backoff=BACKOFF_S,
+                data_dir=DATA_DIR,
+            )
             fetch_counter.inc()
             return jsonify({"fetched": len(df)})
         except Exception as exc:
@@ -184,18 +163,18 @@ def create_app() -> Flask:
     @app.route("/metrics")
     @exempt
     def metrics() -> Any:
-        """Prometheus metrics endpoint."""
-        payload = generate_latest()
-        return payload, 200, {"Content-Type": "text/plain; version=0.0.4"}
+        return generate_latest(), 200, {
+            "Content-Type": "text/plain; version=0.0.4"
+        }
 
     return app
 
-# ─────────────────────────── Global App Init ─────────────────────────────
+# ──────────────────────────── Run server ─────────────────────────────────
 app: Flask = create_app()
 
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=int(os.getenv("PORT", "5000")),
-        debug=(os.getenv("FLASK_DEBUG", "0") == "1"),
+        debug=(os.getenv("FLASK_DEBUG") == "1"),
     )
