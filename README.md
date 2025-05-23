@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://img.shields.io/badge/build-passing-brightgreen)
 
-> **End‑to‑end crypto data lab** – ingest live BTC / ETH prices, store them as partitioned Parquet, serve them via a Flask micro‑service, forecast the next 24 hours, and visualise everything in a Dash dashboard *or* export a single‑page PDF report. Ideal for **Junior Python / Data‑Lab** showcase.
+> **End‑to‑end crypto data lab** – ingest live BTC / ETH prices, store them as partitioned Parquet, serve them via a Flask micro‑service, forecast the next 24 hours, and visualise everything in a Dash dashboard *or* export a single‑page PDF report.
 
 ---
 
