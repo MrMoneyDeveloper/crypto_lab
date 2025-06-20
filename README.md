@@ -4,25 +4,31 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://img.shields.io/badge/build-passing-brightgreen)
 
-> **End‑to‑end crypto data lab** – ingest live BTC / ETH prices, store them as partitioned Parquet, serve them via a Flask micro‑service, forecast the next 24 hours, and visualise everything in a Dash dashboard *or* export a single‑page PDF report.
+> **End‑to‑end crypto data lab** – ingest live BTC / ETH prices, store them as partitioned Parquet, serve them via a Flask micro‑service, forecast the next 24 hours, and visualise everything in a Dash dashboard *or* export a single‑page PDF report.
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features
 
 | Area              | Highlights                                                                                                         |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **Data pipeline** | Hourly REST fetch → pandas DataFrame → Parquet (Hive partitions) with **schema evolution safety** & UTC timestamps |
+| **Data pipeline** | Hourly REST fetch → pandas DataFrame → Parquet (Hive partitions) with **schema evolution safety** & UTC timestamps |
 | **Forecasting**   | AutoARIMA (statsforecast) with Holt‑Winters fallback; configurable horizon & confidence intervals                  |
 | **API**           | Flask + Blueprints · JSON & CSV responses · CORS · SimpleCache layer · Prometheus metrics `/metrics`               |
-| **Dashboard**     | Dash 4, Bootstrap styling, live WebSocket updates, CSV download & "Generate PDF" button                            |
+| **Dashboard**     | Dash 4, Bootstrap styling, live WebSocket updates, CSV download & "Generate PDF" button                            |
 | **Reporting**     | `report.py` builds a single‑page PDF (history, MA, volatility, forecast) via matplotlib/Agg                        |
-| **Ops**           | APScheduler job‑store, structured NDJSON logs, `.env` for secrets, Dockerfile & docker‑compose                     |
-| **Quality**       | Type hints, pre‑commit (`ruff`, `black`), smoke tests with pytest + CI badge                                       |
+| **Ops**           | APScheduler job‑store, structured NDJSON logs, `.env` for secrets, Dockerfile & docker‑compose                     |
+| **Quality**       | Type hints, pre‑commit (`ruff`, `black`), smoke tests with pytest + CI badge                                       |
+| **Data pipeline** | Hourly REST fetch → pandas DataFrame → Parquet partitions |
+| **Forecasting**   | AutoARIMA (statsforecast) with Holt‑Winters fallback |
+| **API**           | Flask JSON endpoints with simple caching and Prometheus metrics `/metrics` |
+| **Dashboard**     | Dash 4, Bootstrap styling, polling updates, CSV download & "Generate PDF" button |
+| **Reporting**     | `report.py` builds a single‑page PDF summary |
+| **Ops**           | APScheduler background jobs and NDJSON logs configured via `.env` |
 
 ---
 
-## 🗂 Project Structure
+## 🗂 Project Structure
 
 ```text
 Crypto-Lab/
@@ -61,6 +67,8 @@ Crypto-Lab/
 ├── README.md
 │
 └── venv/
+├── .env
+└── README.md
 ```
 
 ### Directory notes (unchanged)
@@ -84,26 +92,30 @@ Crypto-Lab/
 
 ---
 
-## ⚡️ Quick Start (Docker, cross‑platform)
+## ⚡️ Quick Start (Docker, cross‑platform)
+## ⚡️ Quick Start
 
 ```bash
 git clone https://github.com/MrMoneyDeveloper/crypto_lab.git
 cd crypto_lab
 cp .env.example .env               # edit API_BASE etc. if desired
-docker compose up --build          # API → :5000, Dash → :8050
+docker compose up --build          # API → :5000, Dash → :8050
+python -m venv venv && source venv/bin/activate
+pip install dash dash-iconify pandas requests pyarrow statsforecast statsmodels matplotlib flask apscheduler python-dotenv prometheus-client flask-caching flask-cors Flask-Limiter
+python controller.py
 ```
 
 > **Tip:** `docker compose up -d` to run detached; logs in `docker compose logs -f`.
 
 ---
 
-## 🪟 Setup and Running on **Windows** (manual)
+## 🪟 Setup and Running on **Windows** (manual)
 
-*(Existing instructions preserved – scroll if you prefer Linux/macOS)*
+*(Existing instructions preserved – scroll if you prefer Linux/macOS)*
 
 ### Prerequisites
 
-1. **Python 3.8+** installed and on your `PATH`.
+1. **Python 3.8+** installed and on your `PATH`.
 2. **Git** (preferred) or ability to download the ZIP from GitHub.
 
 ### 1. Obtain the source
@@ -149,6 +161,7 @@ pip install -r requirements.txt
 
 ```powershell
 pip install dash dash-iconify pandas requests pyarrow statsforecast statsmodels matplotlib flask apscheduler python-dotenv prometheus-client ruff black pytest
+pip install dash dash-iconify pandas requests pyarrow statsforecast statsmodels matplotlib flask apscheduler python-dotenv prometheus-client flask-caching flask-cors Flask-Limiter
 ```
 
 ### 4. Configure environment variables
@@ -171,11 +184,12 @@ python dash_app.py    # dashboard on :8050
 
 ---
 
-## 🐧 Setup on **Linux / macOS**
+## 🐧 Setup on **Linux / macOS**
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+pip install dash dash-iconify pandas requests pyarrow statsforecast statsmodels matplotlib flask apscheduler python-dotenv prometheus-client flask-caching flask-cors Flask-Limiter
 python controller.py
 ```
 
@@ -183,7 +197,7 @@ python controller.py
 
 ---
 
-## 🔧 Environment Variables (.env)
+## 🔧 Environment Variables (.env)
 
 | Key                | Default                            | Description                                        |
 | ------------------ | ---------------------------------- | -------------------------------------------------- |
@@ -193,10 +207,23 @@ python controller.py
 | `CACHE_TTL`        | `30`                               | In‑memory cache expiry (seconds) for API responses |
 | `LOG_LEVEL`        | `INFO`                             | `DEBUG` / `INFO` / `WARNING` etc.                  |
 | `PORT`             | `5000`                             | Flask API port                                     |
+| `COINS`            | `bitcoin,ethereum` | CoinGecko IDs to track |
+| `CURRENCY`         | `usd`             | Quote currency |
+| `DATA_DIR`         | `./data`          | Storage folder for Parquet and logs |
+| `FETCH_INTERVAL`   | `60`              | Seconds between automatic fetches |
+| `TIMEOUT`          | `10`              | HTTP timeout (seconds) |
+| `MAX_RETRIES`      | `3`               | Retry attempts on API failure |
+| `BACKOFF_S`        | `2`               | Back-off multiplier between retries |
+| `FLASK_DEBUG`      | `1`               | Enable Flask debug mode |
+| `PORT`             | `5000`            | Flask API port |
+| `API_BASE`         | `http://127.0.0.1:5000/api/data` | Base URL for API used by other modules |
+| `FMD_USERNAME`     | `admin`           | Flask-Monitoring-Dashboard user |
+| `FMD_PASSWORD`     | `supersecret123`  | Password for FMD |
+| `FMD_SECURITY_TOKEN` | *(none)*        | Security token for FMD |
 
 ---
 
-## 📟 API Reference
+## 📟 API Reference
 
 > Base URL is `http://<host>:5000`
 
@@ -210,7 +237,7 @@ python controller.py
 
 ---
 
-## 🖥️ Dashboard
+## 🖥️ Dashboard
 
 Navigate to `http://<host>:8050` and enjoy:
 
@@ -222,7 +249,7 @@ Navigate to `http://<host>:8050` and enjoy:
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Running Tests
 
 ```bash
 pytest -q   # unit + smoke tests in tests/
@@ -232,7 +259,7 @@ Pre‑commit hooks auto‑run `ruff`, `black` and `pytest --quick`.
 
 ---
 
-## 🐳 Container Images
+## 🐳 Container Images
 
 ```bash
 docker build -t crypto-lab:latest .   # API + scheduler
@@ -255,23 +282,26 @@ services:
 
 ---
 
-## 🛣 Roadmap
+## 🛣 Roadmap
 
 * [ ] WebSocket push to dashboard (no polling)
 * [ ] Automatic schema evolution via PyArrow 17
-* [ ] GitHub Actions matrix build (Windows/macOS/Linux)
+* [ ] GitHub Actions matrix build (Windows/macOS/Linux)
 * [ ] Alpine‑based slim image (<120 MB)
 
 ---
 
-## 🤝 Contributing
+## 🤝 Contributing
 
 1. Fork > feature branch > PR (conventional commits).
 2. Ensure `pre‑commit run --all-files` passes.
 3. Update docs / tests for any new feature.
+1. Fork and create a feature branch using conventional commits.
+2. Format code with `ruff` and `black` before opening a PR.
+3. Update documentation for any new feature.
 
 ---
 
-## 📝 License
+## 📝 License
 
-MIT © Mohammed Farhaan Buckas – see `LICENSE` file.
+MIT © Mohammed Farhaan Buckas – see `LICENSE` file.
